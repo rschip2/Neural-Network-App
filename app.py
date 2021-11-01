@@ -12,7 +12,7 @@ import re
 import numpy as np
 from scipy import stats
 import statsmodels.api as sm
-import urllib
+#import urllib
 
 from sklearn.metrics import auc
 #from sklearn.metrics import roc_auc_score
