@@ -6,7 +6,7 @@ flask==1.1.2
 plotly==5.1.0
 statsmodels==0.12.2
 scikit-learn==0.24.2
-tensorflow==2.6.0
+tensorflow-cpu
 keras==2.6.0
 gunicorn==20.1.0
 
