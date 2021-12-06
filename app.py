@@ -30,6 +30,8 @@ import tensorflow as tf
 import random
 import ann_fxns
 
+import pAUCc as PAUCC # See: https://github.com/Big-Life-Lab/partial-AUC-C/tree/main/Python3.7
+
 tf.random.set_seed(1)
 np.random.seed(1)
 random.seed(1)
@@ -56,7 +58,7 @@ app.config.suppress_callback_exceptions = True
 #########################################################################################
 ###################### PROCESS UPLOADED FILE ############################################
 #########################################################################################
-def parse_contents(contents, filename, date):
+def parse_contents(contents, filename, date, downsample):
     #global df
     
     content_type, content_string = contents.split(',')
@@ -88,6 +90,17 @@ def parse_contents(contents, filename, date):
     #df = df.applymap(lambda x: float(x) if x.isnumeric() else x)
     
     df.dropna(how='any', axis=0, inplace=True)
+    df = df.sample(frac=0.01*downsample, replace=False, random_state=1)
+    
+    features = list(df)
+    for i in features:
+        ls = df[i].tolist()
+        if all(isinstance(item, str) for item in ls) is True:
+            one_hot = pd.get_dummies(df[i])
+            one_hot = one_hot.add_prefix(i + ':')
+            
+            df = df.drop(labels=[i], axis = 1)
+            df = df.join(one_hot)
     
     return df.to_json()
 
@@ -134,7 +147,17 @@ def generate_control_card1():
     return html.Div(
         id="control-card1",
         children=[
-            #html.Br(),
+            html.P("Large files can take several minutes to clean, preprocess, and analyze. Before uploading a large file, choose a random fraction to ensure that all operates as expected."),
+            html.H5("% of data to use"),
+            html.Div(id='down-sample-container'),
+            dcc.Input(id='downsample',
+                type='number',
+                value=100,
+                min=1, max=100, step=1),
+                
+            html.Br(),
+            html.Br(),
+            
             html.P("Upload your data, choose your features," +
                        " customize your neural net, and click 'submit'.",
                         style={
@@ -161,7 +184,8 @@ def generate_control_card1():
 
             html.P("Your file (csv or Excel) should only have" +
                    " columns, rows, and column headers." +
-                   " Your target must be binary (1/0, yes/no, etc.)",
+                   " Columns that are categorical or nonnumerical will automatically" +
+                   " be one-hot encoded.",
                     ),
             
             html.Br(),
@@ -198,17 +222,17 @@ def generate_control_card1():
             html.Div(id='hidden-layers-container'),
             dcc.Input(id='hidden_layers',
                 type='number',
-                value=1,
+                value=0,
                 min=0, max=10, step=1),
             
             html.H5("Nodes in the input layer"),
-            html.P("Choose 2 to 100 nodes." +
+            html.P("Choose 1 to 100 nodes." +
                 " Should be less than the number of features. Start small."),
             html.Div(id='inodes-container'),
             dcc.Input(id='inodes',
                 type='number',
-                value=2,
-                min=2, max=100, step=1),
+                value=1,
+                min=1, max=100, step=1),
                 
             html.H5("Nodes per hidden layer"),
             html.P("Choose 2 to 100 nodes. The more you choose, the slower it runs." +
@@ -227,16 +251,52 @@ def generate_control_card1():
                 type='number',
                 value=10,
                 min=2, max=20, step=1),
-                
             
-            html.H5("% of data to use"),
-            html.P("Use a random fraction of your data."),
-            html.Div(id='down-sample-container'),
-            dcc.Input(id='downsample',
+            html.Br(),
+            html.Br(),
+            html.H5("Fine tuning"),
+            
+            html.H6("No. of epochs"),
+            html.P("Choose 2 to 10,000 training epochs, i.e., the no. of times that the NN algorithm will work through the entire set of training data."),
+            html.Div(id='epochs-container'),
+            dcc.Input(id='epochs',
                 type='number',
-                value=100,
+                value=10,
+                min=2, max=10000, step=1),
+            
+            html.H6("Batch size"),
+            html.P("Choose a batch size from 10 to 100. This is the number of training examples utilized in each epoch. A batch size of 32 is a common default and means that 32 samples from the training data will be used to estimate the error gradient before the model weights are updated."),
+            html.Div(id='batch-size-container'),
+            dcc.Input(id='batch_size',
+                type='number',
+                value=32,
+                min=10, max=100, step=1),
+                
+            html.H6("Early stopping"),
+            html.P("An optimization technique used to reduce overfitting without compromising accuracy that stops training when a monitored metric (loss) has stopped improving. Choose the number of epochs (1 to 100) to wait for loss to improve once it initially stops improving."),
+            html.Div(id='patience-container'),
+            dcc.Input(id='patience',
+                type='number',
+                value=4,
                 min=1, max=100, step=1),
                 
+            html.H6("Learning rate"),
+            html.P("A hyper-parameter used to govern the pace at which the NN algorithm updates the values of a parameter estimate. Choose from values between 0.1 and 0.00001"),
+            html.Div(id='learning-rate-container'),
+            dcc.Slider(id='learning_rate',
+                min=-5,
+                max=-1,
+                step=None,
+                marks={
+                    -5: '0.00001',
+                    -4: '0.0001',
+                    -3: '0.001',
+                    -2: '0.01',
+                    -1: '0.1',
+                },
+                value=-2
+            ),
+            
             html.Br(),
             html.Br(),
             html.Button('submit', id='btn'),
@@ -350,7 +410,7 @@ app.layout = html.Div([
                 html.Div(
                         id="ROC_Fig1",
                         children=html.Div(id="roc_fig1",
-                                children=[html.B("Receiver operatering characteristic (ROC) curve."),
+                                children=[html.B("Receiver operatering characteristic (ROC) curve. True positive rate (TPR) vs. false positive rate (FPR)"),
                                             html.Hr(),
                                             dcc.Loading(
                                             id="loading-2",
@@ -370,12 +430,35 @@ app.layout = html.Div([
                                     ),
                                     
                 html.Div(
-                id="PRC_Fig1",
-                children=html.Div(id="prc_fig1",
-                        children=[html.B("Precision-recall curve (PRC)."),
+                id="ROC_Fig2",
+                children=html.Div(id="roc_fig2",
+                        children=[html.B("Receiver operatering characteristic (ROC) curve. True negative rate (TNR) vs. false negative rate (FNR)"),
                                     html.Hr(),
                                     dcc.Loading(
                                     id="loading-3",
+                                    type="default",
+                                    fullscreen=False,
+                                    children=dcc.Graph(id="roc_fig2_plot"),
+                                    ),
+                                ]),
+                                style={'width': '47%', 'height': '450px',
+                                       'display': 'inline-block',
+                                       'border-radius': '15px',
+                                       'box-shadow': '1px 1px 1px grey',
+                                       'background-color': '#f0f0f0',
+                                       'padding': '10px',
+                                       'margin-bottom': '10px',
+                                       'margin-left': '15px',
+                                       },
+                            ),
+                                    
+                html.Div(
+                id="PRC_Fig1",
+                children=html.Div(id="prc_fig1",
+                        children=[html.B("Precision-recall curve (PRC). Positive predictive value (NPV) vs. True positive rate (TNR)."),
+                                    html.Hr(),
+                                    dcc.Loading(
+                                    id="loading-4",
                                     type="default",
                                     fullscreen=False,
                                     children=dcc.Graph(id="prc_fig1_plot"),
@@ -388,8 +471,29 @@ app.layout = html.Div([
                                        'background-color': '#f0f0f0',
                                        'padding': '10px',
                                        'margin-bottom': '10px',
+                                       },
+                            ),
+                            
+                html.Div(
+                id="PRC_Fig2",
+                children=html.Div(id="prc_fig2",
+                        children=[html.B("Precision-recall curve (PRC) for negative outcomes. Negative predictive value (NPV) vs. True negative rate (TNR)."),
+                                    html.Hr(),
+                                    dcc.Loading(
+                                    id="loading-5",
+                                    type="default",
+                                    fullscreen=False,
+                                    children=dcc.Graph(id="prc_fig2_plot"),
+                                    ),
+                                ]),
+                                style={'width': '47%', 'height': '450px',
+                                       'display': 'inline-block',
+                                       'border-radius': '15px',
+                                       'box-shadow': '1px 1px 1px grey',
+                                       'background-color': '#f0f0f0',
+                                       'padding': '10px',
+                                       'margin-bottom': '10px',
                                        'margin-left': '15px',
-                                       'margin-right': '0px',
                                        },
                             ),
                 
@@ -410,11 +514,12 @@ app.layout = html.Div([
 @app.callback(Output('df1', 'children'),
               [Input('upload-data', 'contents')],
               [State('upload-data', 'filename'),
-               State('upload-data', 'last_modified')])
-def update_output1(list_of_contents, list_of_names, list_of_dates):
+               State('upload-data', 'last_modified'),
+               State('downsample', 'value')])
+def update_output1(list_of_contents, list_of_names, list_of_dates, downsample):
     if list_of_contents is not None:
         children = [
-            parse_contents(c, n, d) for c, n, d in
+            parse_contents(c, n, d, downsample) for c, n, d in
             zip(list_of_contents, list_of_names, list_of_dates)]
         
         json_df = children[0]
@@ -468,9 +573,15 @@ def update_output3(json_df):
                State('inodes', 'value'),
                State('nodes', 'value'),
                State('folds', 'value'),
-               State('downsample', 'value'),
+               State('epochs', 'value'),
+               State('patience', 'value'),
+               State('batch_size', 'value'),
+               State('learning_rate', 'value'),
                ])
-def update_results_df(n_clicks, df, predictors, outcome, hidden_layers, inodes, nodes, folds, downsample):
+def update_results_df(n_clicks, df, predictors, outcome, hidden_layers, inodes, nodes, folds,
+                epochs, patience, batch_size, learning_rate):
+    
+    learning_rate = 10**learning_rate
     
     if isinstance(outcome, str) == True:
         outcome = [outcome]
@@ -478,7 +589,8 @@ def update_results_df(n_clicks, df, predictors, outcome, hidden_layers, inodes, 
     if df is None:
         return df, df
         
-    json_df, ddf = ann_fxns.get_results(df, predictors, outcome, hidden_layers, inodes, nodes, folds, downsample)
+    json_df, ddf = ann_fxns.get_results(df, predictors, outcome, hidden_layers, inodes, nodes, folds,
+                    epochs, patience, batch_size, learning_rate)
     
     df = pd.read_json(json_df)
     ddf = pd.read_json(ddf)
@@ -503,6 +615,8 @@ def update_table1(json_df):
     else:
         df = pd.read_json(json_df)
         df = df.round(3)
+    
+    df = df.sample(n=100, replace=False, random_state=1)
     
     return dash_table.DataTable(
         id="table_plot11",
@@ -539,7 +653,7 @@ def update_table1(json_df):
               [Input('df2', 'children'),
               ],
               )
-def update_results_roc_fig(df2):
+def update_results_roc_fig1(df2):
     
     try:
         df2 = pd.read_json(df2)
@@ -589,6 +703,9 @@ def update_results_roc_fig(df2):
     fpr, tpr = zip(*sorted(zip(fpr, tpr), reverse=True))
     AUC = auc(fpr, tpr)
     
+    #AUC = PAUCC.concordant_partial_AUC(fpr, tpr)
+    #AUC = AUC[3]
+
     clrs = ['#ff0000', '#0000ff', '#009900', '#993399', '#009999',
             '#ff9966', '#00ff00', '#3366cc', '#cc6699', '#000066',]
     clr = clrs[0]
@@ -648,6 +765,125 @@ def update_results_roc_fig(df2):
     
 
     return figure
+    
+    
+
+@app.callback(Output('roc_fig2_plot', 'figure'),
+              [Input('df2', 'children'),
+              ],
+              )
+def update_results_roc_fig2(df2):
+    
+    try:
+        df2 = pd.read_json(df2)
+    except:
+        df2 = None
+    
+    if df2 is None or len(df2['TNR'].tolist()) == 0:
+    
+        figure = go.Figure(data=[go.Table(
+                header=dict(values=[],
+                        fill_color='#b3d1ff',
+                        align='left'),
+                        ),
+                    ],
+                )
+
+        figure.update_layout(title_font=dict(size=14,
+                      color="rgb(38, 38, 38)",
+                      ),
+                      margin=dict(l=10, r=10, b=10, t=0),
+                      paper_bgcolor="#f0f0f0",
+                      plot_bgcolor="#f0f0f0",
+                      height=400,
+                      )
+        
+        return figure
+        
+    
+    df2 = df2[df2['FNR'] >= 0]
+    df2 = df2[df2['TNR'] >= 0]
+    
+    fnr = df2['FNR'].tolist()
+    tnr = df2['TNR'].tolist()
+    if min(fnr) > 0:
+        fnr.append(0)
+        tnr.append(1)
+    if max(fnr) < 1:
+        fnr.append(1)
+        tnr.append(0)
+    if min(tnr) > 0:
+        tnr.append(0)
+        fnr.append(1)
+    if max(tnr) < 1:
+        tnr.append(1)
+        fnr.append(0)
+    
+    fnr, tnr = zip(*sorted(zip(fnr, tnr), reverse=True))
+    AUC = auc(fnr, tnr)
+    
+    #AUC = PAUCC.concordant_partial_AUC(fpr, tpr)
+    #AUC = AUC[3]
+
+    clrs = ['#ff0000', '#0000ff', '#009900', '#993399', '#009999',
+            '#ff9966', '#00ff00', '#3366cc', '#cc6699', '#000066',]
+    clr = clrs[0]
+    
+    fig_data = []
+    
+    df2.sort_values(by=['FNR', 'TNR'], ascending=True, inplace=True)
+    
+    fig_data.append(
+            go.Scatter(x = df2['FNR'], y = df2['TNR'], mode="lines", marker_color = clr,
+            name = '(AUROC = ' + str(np.round(AUC, 2)) + ')',
+            text = df2['TP'] + '<br>' + df2['FP'] + '<br>' + df2['TN'] + '<br>' + df2['FN'] + '<br>' + df2['threshold'] + '<br>' + df2['N'],
+            opacity = 0.75,
+            line=dict(color=clr, width=2),
+        ))
+        
+
+    figure = go.Figure(
+        data=fig_data,
+        layout=go.Layout(
+            xaxis=dict(
+                title=dict(
+                    text="<b>False negative rate (FNR)</b>",
+                    font=dict(
+                        family='"Open Sans", "HelveticaNeue", "Helvetica Neue",'
+                        " Helvetica, Arial, sans-serif",
+                        size=14,
+                    ),
+                ),
+                rangemode="tozero",
+                zeroline=True,
+                showticklabels=True,
+            ),
+            
+            yaxis=dict(
+                title=dict(
+                    text="<b>True negative rate (TNR)</b>",
+                    font=dict(
+                        family='"Open Sans", "HelveticaNeue", "Helvetica Neue",'
+                        " Helvetica, Arial, sans-serif",
+                        size=14,
+                        
+                    ),
+                ),
+                rangemode="tozero",
+                zeroline=True,
+                showticklabels=True,
+            ),
+            
+            margin=dict(l=60, r=30, b=10, t=40),
+            showlegend=True,
+            height=400,
+            paper_bgcolor="rgb(245, 247, 249)",
+            plot_bgcolor="rgb(245, 247, 249)",
+        ),
+    )
+    
+
+    return figure
 
     
 
@@ -655,7 +891,7 @@ def update_results_roc_fig(df2):
               [Input('df2', 'children'),
               ],
               )
-def update_results_prc_fig(df2):
+def update_results_prc_fig1(df2):
     
     try:
         df2 = pd.read_json(df2)
@@ -750,6 +986,104 @@ def update_results_prc_fig(df2):
     return figure
 
 
+
+@app.callback(Output('prc_fig2_plot', 'figure'),
+              [Input('df2', 'children'),
+              ],
+              )
+def update_results_prc_fig2(df2):
+    
+    try:
+        df2 = pd.read_json(df2)
+    except:
+        df2 = None
+    
+    if df2 is None or len(df2['NPV'].tolist()) == 0:
+    
+        figure = go.Figure(data=[go.Table(
+                header=dict(values=[],
+                        fill_color='#b3d1ff',
+                        align='left'),
+                        ),
+                    ],
+                )
+
+        figure.update_layout(title_font=dict(size=14,
+                      color="rgb(38, 38, 38)",
+                      ),
+                      margin=dict(l=10, r=10, b=10, t=0),
+                      paper_bgcolor="#f0f0f0",
+                      plot_bgcolor="#f0f0f0",
+                      height=400,
+                      )
+        
+        return figure
+        
+    
+    df2 = df2[df2['NPV'] >= 0]
+    df2 = df2[df2['TNR'] >= 0]
+    
+    AUC = auc(df2['TNR'], df2['NPV'])
+    
+    clrs = ['#ff0000', '#0000ff', '#009900', '#993399', '#009999',
+            '#ff9966', '#00ff00', '#3366cc', '#cc6699', '#000066',]
+    clr = clrs[0]
+    
+    fig_data = []
+    
+    df2.sort_values(by=['TNR', 'NPV'], ascending=True, inplace=True)
+    
+    fig_data.append(
+            go.Scatter(x = df2['TNR'], y = df2['NPV'], mode="lines", marker_color = clr,
+            name = '(AUPRC = ' + str(np.round(AUC, 2)) + ')',
+            text = df2['TP'] + '<br>' + df2['FP'] + '<br>' + df2['TN'] + '<br>' + df2['FN'] + '<br>' + df2['threshold'] + '<br>' + df2['N'],
+            opacity = 0.75,
+            line=dict(color=clr, width=2),
+        ))
+        
+
+    figure = go.Figure(
+        data=fig_data,
+        layout=go.Layout(
+            xaxis=dict(
+                title=dict(
+                    text="<b>True negative rate</b>",
+                    font=dict(
+                        family='"Open Sans", "HelveticaNeue", "Helvetica Neue",'
+                        " Helvetica, Arial, sans-serif",
+                        size=14,
+                    ),
+                ),
+                rangemode="tozero",
+                zeroline=True,
+                showticklabels=True,
+            ),
+            
+            yaxis=dict(
+                title=dict(
+                    text="<b>Negative predictive value</b>",
+                    font=dict(
+                        family='"Open Sans", "HelveticaNeue", "Helvetica Neue",'
+                        " Helvetica, Arial, sans-serif",
+                        size=14,
+                        
+                    ),
+                ),
+                rangemode="tozero",
+                zeroline=True,
+                showticklabels=True,
+            ),
+            
+            margin=dict(l=60, r=30, b=10, t=40),
+            showlegend=True,
+            height=400,
+            paper_bgcolor="rgb(245, 247, 249)",
+            plot_bgcolor="rgb(245, 247, 249)",
+        ),
+    )
+    
+
+    return figure
 #########################################################################################
 ############################# Run the server ############################################
 #########################################################################################
