@@ -147,6 +147,13 @@ def concordant_partial_AUC(pfpr, ptpr):
     dely = g - f
     horizontal_stripe_area = (dely * 1)
 
+    pAUCcn = 0
+    pAUCc = 0
+    pAUC = 0
+    pAUCx = 0
+    pAUCxn = 0
+    sPA = 0
+    
     if delx == 0:
         print("Warning: For pAUC and pAUCc the width (delx) of the vertical column is zero.")
         pAUC  = 0

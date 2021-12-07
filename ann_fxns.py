@@ -172,102 +172,155 @@ def get_results(df, predictors, outcome, hidden_layers, inodes, nodes, folds,
     gc.collect()
     K.clear_session()
     
-    tpr_ls = []
-    tnr_ls = []
-    fpr_ls = []
-    fnr_ls = []
-    ppv_ls = []
-    npv_ls = []
-    ct_ls = []
-    tp_ls = []
-    fp_ls = []
-    tn_ls = []
-    fn_ls = []
-    n_ls = []
-
-    cut_ls = np.linspace(-0.01, 1.01, 1000).tolist()
-    for c in cut_ls:
-        
-        tp, fp, tn, fn = 0,0,0,0
-        tpr, fpr, fnr, tnr = 0,0,0,0
-        ppv, npv = 0, 0
-
-        obs = df[outcome].values.tolist()
-        exp = df['prediction'].values.tolist()
-        
-        for i, o in enumerate(obs):
-                
-            e = exp[i]
-            
-            if o == 0 and e < c:
-                tn += 1
-            elif o == 0 and e >= c:
-                fp += 1
-            elif o == 1 and e >= c:
-                tp += 1
-            elif o == 1 and e < c:
-                fn += 1
-        
-        if tp + fn > 0:
-            tpr = tp/(tp + fn)
-            fnr = fn/(tp + fn)
-        else:
-            tpr = np.nan
-            fnr = np.nan
-        
-        if fp + tn > 0:
-            fpr = fp/(fp + tn)
-            tnr = tn/(fp + tn)
-        else:
-            fpr = np.nan
-            tnr = np.nan
-        
-        if tp + fp > 0:
-            ppv = tp/(tp + fp)
-        else:
-            ppv = np.nan
-            
-        if tn + fn > 0:
-            npv = tn/(tn + fn)
-        else:
-            npv = np.nan
-        
-        tpr_ls.append(tpr)
-        fpr_ls.append(fpr)
-        tnr_ls.append(tnr)
-        fnr_ls.append(fnr)
-        ppv_ls.append(ppv)
-        npv_ls.append(npv)
-        ct_ls.append(np.round(c,6))
-        
-        tp_ls.append(tp)
-        fp_ls.append(fp)
-        tn_ls.append(tn)
-        fn_ls.append(fn)
-        n_ls.append(tp + fp + tn + fn)
-        
-    n_ls  = ['N: ' + str(s) for s in n_ls]
-    tp_ls = ['TP: ' + str(s) for s in tp_ls]
-    fp_ls = ['FP: ' + str(s) for s in fp_ls]
-    tn_ls = ['TN: ' + str(s) for s in tn_ls]
-    fn_ls = ['FN: ' + str(s) for s in fn_ls]
-    ct_ls = ['Threshold: ' + str(s) for s in ct_ls]
-
+    hlim = 75
+    llim = 25
+    
+    pred = df['prediction'].tolist()
+    llim2 = np.percentile(pred, llim)
+    hlim2 = np.percentile(pred, hlim)
+    df2 = df[df['prediction'] >= hlim2]
+    df2['certainty_category'] = ['upper quartile']*df2.shape[0]
+    
+    df3 = df[df['prediction'] <= llim2]
+    df3['certainty_category'] = ['lower quartile']*df3.shape[0]
+    
+    df4 = df[(df['prediction'] > llim2) & (df['prediction'] < hlim2)]
+    df4['certainty_category'] = ['middle quartiles']*df4.shape[0]
+    
+    df5 = df[(df['prediction'] < llim2) | (df['prediction'] > hlim2)]
+    df5['certainty_category'] = ['upper and lower quartiles']*df5.shape[0]
+    
+    df6 = df.copy(deep=True)
+    df6['certainty_category'] = ['all quartiles']*df6.shape[0]
+    df = pd.concat([df2, df3, df4, df5, df6], ignore_index=True)
+    
+    del df2
+    del df3
+    del df4
+    del df5
+    del df6
     
     ddf = pd.DataFrame(columns=['TPR'])
-    ddf['TPR'] = tpr_ls
-    ddf['TNR'] = tnr_ls
-    ddf['FPR'] = fpr_ls
-    ddf['FNR'] = fnr_ls
-    ddf['PPV'] = ppv_ls
-    ddf['NPV'] = npv_ls
-    ddf['threshold'] = ct_ls
-    ddf['TP'] = tp_ls
-    ddf['FP'] = fp_ls
-    ddf['TN'] = tn_ls
-    ddf['FN'] = fn_ls
-    ddf['N'] = n_ls
-    
+    for cat in ['upper quartile', 'lower quartile', 'middle quartiles',
+                'all quartiles', 'upper and lower quartiles']:
+
+        tdf = df[df['certainty_category'] == cat]
+        tpr_ls = []
+        tnr_ls = []
+        fpr_ls = []
+        fnr_ls = []
+        ppv_ls = []
+        npv_ls = []
+        ct_ls = []
+        tp_ls = []
+        fp_ls = []
+        tn_ls = []
+        fn_ls = []
+        n_ls = []
+
+        cut_ls = np.linspace(-0.01, 1.01, 1000).tolist()
+        for c in cut_ls:
+            
+            tp, fp, tn, fn = 0,0,0,0
+            tpr, fpr, fnr, tnr = 0,0,0,0
+            ppv, npv = 0, 0
+
+            obs = tdf[outcome].values.tolist()
+            exp = tdf['prediction'].values.tolist()
+            
+            for i, o in enumerate(obs):
+                    
+                e = exp[i]
+                
+                if o == 0 and e < c:
+                    tn += 1
+                elif o == 0 and e >= c:
+                    fp += 1
+                elif o == 1 and e >= c:
+                    tp += 1
+                elif o == 1 and e < c:
+                    fn += 1
+            
+            if tp + fn > 0:
+                tpr = tp/(tp + fn)
+                fnr = fn/(tp + fn)
+            else:
+                tpr = np.nan
+                fnr = np.nan
+            
+            if fp + tn > 0:
+                fpr = fp/(fp + tn)
+                tnr = tn/(fp + tn)
+            else:
+                fpr = np.nan
+                tnr = np.nan
+            
+            if tp + fp > 0:
+                ppv = tp/(tp + fp)
+            else:
+                ppv = np.nan
+                
+            if tn + fn > 0:
+                npv = tn/(tn + fn)
+            else:
+                npv = np.nan
+            
+            tpr_ls.append(tpr)
+            fpr_ls.append(fpr)
+            tnr_ls.append(tnr)
+            fnr_ls.append(fnr)
+            ppv_ls.append(ppv)
+            npv_ls.append(npv)
+            ct_ls.append(np.round(c,6))
+            
+            tp_ls.append(tp)
+            fp_ls.append(fp)
+            tn_ls.append(tn)
+            fn_ls.append(fn)
+            n_ls.append(tp + fp + tn + fn)
+            
+        n_ls  = ['N: ' + str(s) for s in n_ls]
+        tp_ls = ['TP: ' + str(s) for s in tp_ls]
+        fp_ls = ['FP: ' + str(s) for s in fp_ls]
+        tn_ls = ['TN: ' + str(s) for s in tn_ls]
+        fn_ls = ['FN: ' + str(s) for s in fn_ls]
+        ct_ls = ['Threshold: ' + str(s) for s in ct_ls]
+
+        if c == 'upper quartile':
+            ddf = pd.DataFrame(columns=['TPR'])
+            ddf['TPR'] = tpr_ls
+            ddf['TNR'] = tnr_ls
+            ddf['FPR'] = fpr_ls
+            ddf['FNR'] = fnr_ls
+            ddf['PPV'] = ppv_ls
+            ddf['NPV'] = npv_ls
+            ddf['threshold'] = ct_ls
+            ddf['TP'] = tp_ls
+            ddf['FP'] = fp_ls
+            ddf['TN'] = tn_ls
+            ddf['FN'] = fn_ls
+            ddf['N'] = n_ls
+            ddf['certainty_category'] = [cat]*len(tpr_ls)
+            
+        else:
+            tddf = pd.DataFrame(columns=['TPR'])
+            tddf['TPR'] = tpr_ls
+            tddf['TNR'] = tnr_ls
+            tddf['FPR'] = fpr_ls
+            tddf['FNR'] = fnr_ls
+            tddf['PPV'] = ppv_ls
+            tddf['NPV'] = npv_ls
+            tddf['threshold'] = ct_ls
+            tddf['TP'] = tp_ls
+            tddf['FP'] = fp_ls
+            tddf['TN'] = tn_ls
+            tddf['FN'] = fn_ls
+            tddf['N'] = n_ls
+            tddf['certainty_category'] = [cat]*len(tpr_ls)
+        
+            ddf = pd.concat([ddf, tddf], ignore_index=True)
+            
     df.drop(labels='index', axis=1, inplace=True)
+    
     return df.to_json(), ddf.to_json()
 
