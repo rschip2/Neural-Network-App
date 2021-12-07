@@ -30,6 +30,8 @@ import tensorflow as tf
 import random
 import ann_fxns
 
+import pAUCc as PAUCC # See: https://github.com/Big-Life-Lab/partial-AUC-C/tree/main/Python3.7
+
 tf.random.set_seed(1)
 np.random.seed(1)
 random.seed(1)
@@ -52,11 +54,44 @@ app.config.suppress_callback_exceptions = True
 ################################# LOAD DATA #############################################
 #########################################################################################
 
-
+traces_list = ['all quartiles', 'upper quartile', 'lower quartile',
+    'upper and lower quartiles', 'middle quartiles']
 #########################################################################################
 ###################### PROCESS UPLOADED FILE ############################################
 #########################################################################################
-def parse_contents(contents, filename, date):
+
+def get_partial_auc(x, y, mfr):
+
+    x_part = []
+    y_part = []
+    for i, xi in enumerate(x):
+        if xi <= mfr:
+            x_part.append(xi)
+            y_part.append(y[i])
+        
+    pAUC = PAUCC.concordant_partial_AUC(x_part, y_part)
+    #print(mfr, ' -- ', pAUC, ' -- ', pAUC[3])
+    return pAUC
+
+def fix_end_points(fpr, tpr):
+
+    if min(fpr) > 0:
+        fpr.append(0)
+        tpr.append(1)
+    if max(fpr) < 1:
+        fpr.append(1)
+        tpr.append(0)
+    if min(tpr) > 0:
+        tpr.append(0)
+        fpr.append(1)
+    if max(tpr) < 1:
+        tpr.append(1)
+        fpr.append(0)
+    
+    return fpr, tpr
+
+
+def parse_contents(contents, filename, date, downsample):
     #global df
     
     content_type, content_string = contents.split(',')
@@ -88,6 +123,17 @@ def parse_contents(contents, filename, date):
     #df = df.applymap(lambda x: float(x) if x.isnumeric() else x)
     
     df.dropna(how='any', axis=0, inplace=True)
+    df = df.sample(frac=0.01*downsample, replace=False, random_state=1)
+    
+    features = list(df)
+    for i in features:
+        ls = df[i].tolist()
+        if all(isinstance(item, str) for item in ls) is True:
+            one_hot = pd.get_dummies(df[i])
+            one_hot = one_hot.add_prefix(i + ':')
+            
+            df = df.drop(labels=[i], axis = 1)
+            df = df.join(one_hot)
     
     return df.to_json()
 
@@ -134,7 +180,17 @@ def generate_control_card1():
     return html.Div(
         id="control-card1",
         children=[
-            #html.Br(),
+            html.P("Large files can take several minutes to clean, preprocess, and analyze. Before uploading a large file, choose a random fraction to ensure that all operates as expected."),
+            html.H5("% of data to use"),
+            html.Div(id='down-sample-container'),
+            dcc.Input(id='downsample',
+                type='number',
+                value=100,
+                min=1, max=100, step=1),
+                
+            html.Br(),
+            html.Br(),
+            
             html.P("Upload your data, choose your features," +
                        " customize your neural net, and click 'submit'.",
                         style={
@@ -161,7 +217,8 @@ def generate_control_card1():
 
             html.P("Your file (csv or Excel) should only have" +
                    " columns, rows, and column headers." +
-                   " Your target must be binary (1/0, yes/no, etc.)",
+                   " Columns that are categorical or nonnumerical will automatically" +
+                   " be one-hot encoded.",
                     ),
             
             html.Br(),
@@ -198,17 +255,17 @@ def generate_control_card1():
             html.Div(id='hidden-layers-container'),
             dcc.Input(id='hidden_layers',
                 type='number',
-                value=1,
+                value=0,
                 min=0, max=10, step=1),
             
             html.H5("Nodes in the input layer"),
-            html.P("Choose 2 to 100 nodes." +
+            html.P("Choose 1 to 100 nodes." +
                 " Should be less than the number of features. Start small."),
             html.Div(id='inodes-container'),
             dcc.Input(id='inodes',
                 type='number',
-                value=2,
-                min=2, max=100, step=1),
+                value=1,
+                min=1, max=100, step=1),
                 
             html.H5("Nodes per hidden layer"),
             html.P("Choose 2 to 100 nodes. The more you choose, the slower it runs." +
@@ -227,16 +284,51 @@ def generate_control_card1():
                 type='number',
                 value=10,
                 min=2, max=20, step=1),
-                
             
-            html.H5("% of data to use"),
-            html.P("Use a random fraction of your data."),
-            html.Div(id='down-sample-container'),
-            dcc.Input(id='downsample',
+            html.Br(),
+            html.Br(),
+            html.H5("Fine tuning"),
+            
+            html.H6("No. of epochs"),
+            html.P("Choose 2 to 10,000 training epochs, i.e., the no. of times that the NN algorithm will work through the entire set of training data."),
+            html.Div(id='epochs-container'),
+            dcc.Input(id='epochs',
                 type='number',
-                value=100,
+                value=10,
+                min=2, max=10000, step=1),
+            
+            html.H6("Batch size"),
+            html.P("Choose a batch size from 10 to 100. This is the number of training examples utilized in each epoch. A batch size of 32 is a common default and means that 32 samples from the training data will be used to estimate the error gradient before the model weights are updated."),
+            html.Div(id='batch-size-container'),
+            dcc.Input(id='batch_size',
+                type='number',
+                value=32,
+                min=10, max=100, step=1),
+                
+            html.H6("Early stopping"),
+            html.P("An optimization technique used to reduce overfitting without compromising accuracy that stops training when a monitored metric (loss) has stopped improving. Choose the number of epochs (1 to 100) to wait for loss to improve once it initially stops improving."),
+            html.Div(id='patience-container'),
+            dcc.Input(id='patience',
+                type='number',
+                value=4,
                 min=1, max=100, step=1),
                 
+            html.H6("Learning rate"),
+            html.P("A hyper-parameter used to govern the pace at which the NN algorithm updates the values of a parameter estimate. Choose from values between 0.1 and 0.00001"),
+            html.Div(id='learning-rate-container'),
+            dcc.Slider(id='learning_rate',
+                min=-5,
+                max=-1,
+                step=None,
+                marks={
+                    -4: '0.0001',
+                    -3: '0.001',
+                    -2: '0.01',
+                    -1: '0.1',
+                },
+                value=-2
+            ),
+            
             html.Br(),
             html.Br(),
             html.Button('submit', id='btn'),
@@ -245,6 +337,71 @@ def generate_control_card1():
     )
 
     
+
+def generate_control_card2():
+
+    return html.Div(
+        id="control-card2",
+        children=[
+            html.Div(id='max-false-rate-container',
+                children=[
+                    html.H6("Maximum false rate (MFR)"),
+                    html.P("Choose a maximum acceptable rate of false positive and false negatives. The app will calculate partial AUC values for partial ROC curves based on the MFR. These partial AUC values are calculated using the partial concordant AUC metric (pAUCc)."),
+                    dcc.Slider(id='max_false_rate',
+                        min=0.1, max=1.0, step=None, value=0.25,
+                        marks={
+                                0.15: '0.15',
+                                0.25: '0.25',
+                                0.35: '0.35',
+                                0.45: '0.45',
+                                0.55: '0.55',
+                                0.65: '0.65',
+                                0.75: '0.75',
+                                0.85: '0.85',
+                                0.95: '0.95',
+                                1.0: '1'
+                               },
+                        ),],
+                style={'width': '45%', 'display': 'inline-block', 'margin': '10px',
+                        },
+                ),
+                        
+            html.Div(id='traces-container',
+                children=[
+                    html.H6("Choose the prediction quartiles to plot"),
+                    html.P("The predicted values for individual observations are probabilities of being a positive. These are divided into quartiles, with predictions of greatest confidence occurring in the lower and upper quartiles, i.e., likely positives and negatives."),
+                    dcc.Dropdown(
+                        id="traces1",
+                        options=[{"label": i, "value": i} for i in traces_list],
+                        multi=True,
+                        value=traces_list,
+                        ),
+                    ],
+                style={'width': '45%', 'display': 'inline-block', 'margin': '10px'},
+                ),
+            ],
+    )
+    
+
+def generate_control_card3():
+
+    return html.Div(
+        id="control-card3",
+        children=[
+            html.Div(id='pcr-traces-container',
+                children=[
+                    html.H6("Choose the prediction quartiles to plot"),
+                    dcc.Dropdown(
+                        id="traces2",
+                        options=[{"label": i, "value": i} for i in traces_list],
+                        multi=True,
+                        value=traces_list,
+                        ),
+                    ],
+                style={'width': '45%', 'display': 'inline-block', 'margin': '10px'},
+                ),
+            ],
+    )
 
 #########################################################################################
 ################################# DASH APP LAYOUT #######################################
@@ -348,40 +505,54 @@ app.layout = html.Div([
 
                             
                 html.Div(
-                        id="ROC_Fig1",
-                        children=html.Div(id="roc_fig1",
-                                children=[html.B("Receiver operatering characteristic (ROC) curve."),
-                                            html.Hr(),
-                                            dcc.Loading(
-                                            id="loading-2",
-                                            type="default",
-                                            fullscreen=False,
-                                            children=dcc.Graph(id="roc_fig1_plot"),
-                                            ),
-                                        ]),
-                                        style={'width': '47%', 'height': '450px',
-                                               'display': 'inline-block',
-                                               'border-radius': '15px',
-                                               'box-shadow': '1px 1px 1px grey',
-                                               'background-color': '#f0f0f0',
-                                               'padding': '10px',
-                                               'margin-bottom': '10px',
-                                               },
-                                    ),
-                                    
+                    id="ROC_box",
+                    children=html.Div(
+                            children=[
+                                html.H5("Receiver operatering characteristic (ROC) curves"),
+                                generate_control_card2(),
+                                ]),
+                                style={'width': '98%',
+                                        #'height': '560px',
+                                        'display': 'inline-block',
+                                        'border-radius': '15px',
+                                        'box-shadow': '1px 1px 1px grey',
+                                        'background-color': '#f0f0f0',
+                                        'padding': '10px',
+                                        'margin-bottom': '10px',
+                                        },
+                                ),
                 html.Div(
-                id="PRC_Fig1",
-                children=html.Div(id="prc_fig1",
-                        children=[html.B("Precision-recall curve (PRC)."),
-                                    html.Hr(),
-                                    dcc.Loading(
+                id="ROC_Fig1",
+                children=html.Div(id="roc_fig1",
+                        children=[dcc.Loading(
+                                    id="loading-2",
+                                    type="default",
+                                    fullscreen=False,
+                                    children=dcc.Graph(id="roc_fig1_plot"),
+                                    ),
+                                ]),
+                                style={'width': '47%', 'height': '560px',
+                                       'display': 'inline-block',
+                                       'border-radius': '15px',
+                                       'box-shadow': '1px 1px 1px grey',
+                                       'background-color': '#f0f0f0',
+                                       'padding': '10px',
+                                       'margin-bottom': '10px',
+                                       },
+                            ),
+                            
+                            
+                html.Div(
+                id="ROC_Fig2",
+                children=html.Div(id="roc_fig2",
+                        children=[dcc.Loading(
                                     id="loading-3",
                                     type="default",
                                     fullscreen=False,
-                                    children=dcc.Graph(id="prc_fig1_plot"),
+                                    children=dcc.Graph(id="roc_fig2_plot"),
                                     ),
                                 ]),
-                                style={'width': '47%', 'height': '450px',
+                                style={'width': '47%', 'height': '560px',
                                        'display': 'inline-block',
                                        'border-radius': '15px',
                                        'box-shadow': '1px 1px 1px grey',
@@ -389,7 +560,67 @@ app.layout = html.Div([
                                        'padding': '10px',
                                        'margin-bottom': '10px',
                                        'margin-left': '15px',
-                                       'margin-right': '0px',
+                                       },
+                            ),
+                
+                
+                html.Div(
+                id="PRC_box",
+                children=html.Div(
+                        children=[
+                            html.H5("Precision-recall curves (PRCs)"),
+                            #html.B("As with the ROC curves above, predicted values for individual observations have been divided into quartiles."),
+                            generate_control_card3()
+                            ]),
+                            style={'width': '98%',
+                                    #'height': '560px',
+                                    'display': 'inline-block',
+                                    'border-radius': '15px',
+                                    'box-shadow': '1px 1px 1px grey',
+                                    'background-color': '#f0f0f0',
+                                    'padding': '10px',
+                                    'margin-bottom': '10px',
+                                    },
+                            ),
+                
+                html.Div(
+                id="PRC_Fig1",
+                children=html.Div(id="prc_fig1",
+                        children=[dcc.Loading(
+                                    id="loading-4",
+                                    type="default",
+                                    fullscreen=False,
+                                    children=dcc.Graph(id="prc_fig1_plot"),
+                                    ),
+                                ]),
+                                style={'width': '47%', 'height': '560px',
+                                       'display': 'inline-block',
+                                       'border-radius': '15px',
+                                       'box-shadow': '1px 1px 1px grey',
+                                       'background-color': '#f0f0f0',
+                                       'padding': '10px',
+                                       'margin-bottom': '10px',
+                                       },
+                            ),
+                            
+                html.Div(
+                id="PRC_Fig2",
+                children=html.Div(id="prc_fig2",
+                        children=[dcc.Loading(
+                                    id="loading-5",
+                                    type="default",
+                                    fullscreen=False,
+                                    children=dcc.Graph(id="prc_fig2_plot"),
+                                    ),
+                                ]),
+                                style={'width': '47%', 'height': '560px',
+                                       'display': 'inline-block',
+                                       'border-radius': '15px',
+                                       'box-shadow': '1px 1px 1px grey',
+                                       'background-color': '#f0f0f0',
+                                       'padding': '10px',
+                                       'margin-bottom': '10px',
+                                       'margin-left': '15px',
                                        },
                             ),
                 
@@ -410,11 +641,12 @@ app.layout = html.Div([
 @app.callback(Output('df1', 'children'),
               [Input('upload-data', 'contents')],
               [State('upload-data', 'filename'),
-               State('upload-data', 'last_modified')])
-def update_output1(list_of_contents, list_of_names, list_of_dates):
+               State('upload-data', 'last_modified'),
+               State('downsample', 'value')])
+def update_output1(list_of_contents, list_of_names, list_of_dates, downsample):
     if list_of_contents is not None:
         children = [
-            parse_contents(c, n, d) for c, n, d in
+            parse_contents(c, n, d, downsample) for c, n, d in
             zip(list_of_contents, list_of_names, list_of_dates)]
         
         json_df = children[0]
@@ -468,9 +700,15 @@ def update_output3(json_df):
                State('inodes', 'value'),
                State('nodes', 'value'),
                State('folds', 'value'),
-               State('downsample', 'value'),
+               State('epochs', 'value'),
+               State('patience', 'value'),
+               State('batch_size', 'value'),
+               State('learning_rate', 'value'),
                ])
-def update_results_df(n_clicks, df, predictors, outcome, hidden_layers, inodes, nodes, folds, downsample):
+def update_results_df(n_clicks, df, predictors, outcome, hidden_layers, inodes, nodes, folds,
+                epochs, patience, batch_size, learning_rate):
+    
+    learning_rate = 10**learning_rate
     
     if isinstance(outcome, str) == True:
         outcome = [outcome]
@@ -478,7 +716,8 @@ def update_results_df(n_clicks, df, predictors, outcome, hidden_layers, inodes, 
     if df is None:
         return df, df
         
-    json_df, ddf = ann_fxns.get_results(df, predictors, outcome, hidden_layers, inodes, nodes, folds, downsample)
+    json_df, ddf = ann_fxns.get_results(df, predictors, outcome, hidden_layers, inodes, nodes, folds,
+                    epochs, patience, batch_size, learning_rate)
     
     df = pd.read_json(json_df)
     ddf = pd.read_json(ddf)
@@ -503,6 +742,8 @@ def update_table1(json_df):
     else:
         df = pd.read_json(json_df)
         df = df.round(3)
+    
+    df = df.sample(n=100, replace=False, random_state=1)
     
     return dash_table.DataTable(
         id="table_plot11",
@@ -537,9 +778,11 @@ def update_table1(json_df):
 
 @app.callback(Output('roc_fig1_plot', 'figure'),
               [Input('df2', 'children'),
+              Input('max_false_rate', 'value'),
+              Input('traces1', 'value'),
               ],
               )
-def update_results_roc_fig(df2):
+def update_results_roc_fig1(df2, mfr, traces_ls):
     
     try:
         df2 = pd.read_json(df2)
@@ -562,7 +805,7 @@ def update_results_roc_fig(df2):
                       margin=dict(l=10, r=10, b=10, t=0),
                       paper_bgcolor="#f0f0f0",
                       plot_bgcolor="#f0f0f0",
-                      height=400,
+                      height=550,
                       )
         
         return figure
@@ -571,47 +814,55 @@ def update_results_roc_fig(df2):
     df2 = df2[df2['FPR'] >= 0]
     df2 = df2[df2['TPR'] >= 0]
     
-    fpr = df2['FPR'].tolist()
-    tpr = df2['TPR'].tolist()
-    if min(fpr) > 0:
-        fpr.append(0)
-        tpr.append(1)
-    if max(fpr) < 1:
-        fpr.append(1)
-        tpr.append(0)
-    if min(tpr) > 0:
-        tpr.append(0)
-        fpr.append(1)
-    if max(tpr) < 1:
-        tpr.append(1)
-        fpr.append(0)
-    
-    fpr, tpr = zip(*sorted(zip(fpr, tpr), reverse=True))
-    AUC = auc(fpr, tpr)
-    
-    clrs = ['#ff0000', '#0000ff', '#009900', '#993399', '#009999',
-            '#ff9966', '#00ff00', '#3366cc', '#cc6699', '#000066',]
-    clr = clrs[0]
-    
     fig_data = []
+    clrs = ['#262626', '#ff0000', '#0066ff', '#b300b3', '#00cccc']
     
-    df2.sort_values(by=['FPR', 'TPR'], ascending=True, inplace=True)
+    for ic, c in enumerate(traces_ls):
     
-    fig_data.append(
-            go.Scatter(x = df2['FPR'], y = df2['TPR'], mode="lines", marker_color = clr,
-            name = '(AUROC = ' + str(np.round(AUC, 2)) + ')',
-            text = df2['TP'] + '<br>' + df2['FP'] + '<br>' + df2['TN'] + '<br>' + df2['FN'] + '<br>' + df2['threshold'] + '<br>' + df2['N'],
-            opacity = 0.75,
-            line=dict(color=clr, width=2),
-        ))
+        if c == 'all quartiles':
+            clr = clrs[0]
+        elif c == 'upper quartile':
+            clr = clrs[1]
+        elif c == 'lower quartile':
+            clr = clrs[2]
+        elif c == 'upper and lower quartiles':
+            clr = clrs[3]
+        elif c == 'middle quartiles':
+            clr = clrs[4]
         
+        tdf = df2[df2['certainty_category'] == c]
+        #print('\n\n-----------------------------', c)
+        #print('----------------------------- shape', tdf.shape[0])
+        #print('-----------------------------\n\n',)
+        
+        tdf.sort_values(by=['FPR', 'TPR'], ascending=True, inplace=True)
+        
+        fpr = tdf['FPR'].tolist()
+        tpr = tdf['TPR'].tolist()
+        
+        #fpr, tpr = fix_end_points(fpr, tpr)
+        AUC = auc(fpr, tpr)
+        
+        pAUC = get_partial_auc(fpr, tpr, mfr)
+        pAUCc = pAUC[3]
 
+        fig_data.append(
+                go.Scatter(x = tdf['FPR'], y = tdf['TPR'], mode="lines", marker_color = clr,
+                name = c + ': AUC = ' + str(np.round(AUC, 2)) + ', pAUCc = ' + str(np.round(pAUCc,2)),
+                text = tdf['TP'] + '<br>' + tdf['FP'] + '<br>' + tdf['TN'] + '<br>' + tdf['FN'] + '<br>' + tdf['threshold'] + '<br>' + tdf['N'],
+                opacity = 0.75,
+                line=dict(color=clr, width=2),
+            ))
+        
+    fig_data.append(go.Scatter(x=[mfr, mfr], y=[0, 1], mode="lines", type = 'scatter',
+                                marker_color = '#b3b3b3', name="Max FPR"))
+    
     figure = go.Figure(
         data=fig_data,
         layout=go.Layout(
             xaxis=dict(
                 title=dict(
-                    text="<b>False positive rate (FPR) (aka false alarm rate)</b>",
+                    text="<b>False positive rate (FPR)</b>",
                     font=dict(
                         family='"Open Sans", "HelveticaNeue", "Helvetica Neue",'
                         " Helvetica, Arial, sans-serif",
@@ -625,7 +876,7 @@ def update_results_roc_fig(df2):
             
             yaxis=dict(
                 title=dict(
-                    text="<b>True positive rate (TPR) (aka recall, sensitivity)</b>",
+                    text="<b>True positive rate (TPR)</b>",
                     font=dict(
                         family='"Open Sans", "HelveticaNeue", "Helvetica Neue",'
                         " Helvetica, Arial, sans-serif",
@@ -640,12 +891,168 @@ def update_results_roc_fig(df2):
             
             margin=dict(l=60, r=30, b=10, t=40),
             showlegend=True,
-            height=400,
+            height=550,
             paper_bgcolor="rgb(245, 247, 249)",
             plot_bgcolor="rgb(245, 247, 249)",
         ),
     )
     
+    ypos = -0.25
+    figure.update_layout(
+        legend=dict(
+            orientation = "h",
+            y = ypos,
+            yanchor = "top",
+            xanchor="left",
+            traceorder = "normal",
+            font = dict(
+                size = 12,
+                color = "rgb(38, 38, 38)"
+            ),
+            
+        )
+    )
+
+    return figure
+    
+    
+
+@app.callback(Output('roc_fig2_plot', 'figure'),
+              [Input('df2', 'children'),
+              Input('max_false_rate', 'value'),
+              Input('traces1', 'value'),
+              ],
+              )
+def update_results_roc_fig2(df2, mfr, traces_ls):
+    
+    try:
+        df2 = pd.read_json(df2)
+    except:
+        df2 = None
+    
+    if df2 is None or len(df2['TNR'].tolist()) == 0:
+    
+        figure = go.Figure(data=[go.Table(
+                header=dict(values=[],
+                        fill_color='#b3d1ff',
+                        align='left'),
+                        ),
+                    ],
+                )
+
+        figure.update_layout(title_font=dict(size=14,
+                      color="rgb(38, 38, 38)",
+                      ),
+                      margin=dict(l=10, r=10, b=10, t=0),
+                      paper_bgcolor="#f0f0f0",
+                      plot_bgcolor="#f0f0f0",
+                      height=550,
+                      )
+        
+        return figure
+        
+    
+    df2 = df2[df2['FNR'] >= 0]
+    df2 = df2[df2['TNR'] >= 0]
+    
+    fig_data = []
+    clrs = ['#262626', '#ff0000', '#0066ff', '#b300b3', '#00cccc']
+    
+    for ic, c in enumerate(traces_ls):
+
+        if c == 'all quartiles':
+            clr = clrs[0]
+        elif c == 'upper quartile':
+            clr = clrs[1]
+        elif c == 'lower quartile':
+            clr = clrs[2]
+        elif c == 'upper and lower quartiles':
+            clr = clrs[3]
+        elif c == 'middle quartiles':
+            clr = clrs[4]
+            
+        tdf = df2[df2['certainty_category'] == c]
+        #print('\n\n-----------------------------', c)
+        #print('----------------------------- shape', tdf.shape[0])
+        #print('-----------------------------\n\n',)
+        
+        tdf.sort_values(by=['FNR', 'TNR'], ascending=True, inplace=True)
+        
+        fnr = tdf['FNR'].tolist()
+        tnr = tdf['TNR'].tolist()
+        
+        #fpr, tpr = fix_end_points(fpr, tpr)
+        AUC = auc(fnr, tnr)
+        
+        pAUC = get_partial_auc(fnr, tnr, mfr)
+        pAUCc = pAUC[3]
+
+        fig_data.append(
+                go.Scatter(x = tdf['FNR'], y = tdf['TNR'], mode="lines", marker_color = clr,
+                name = c + ': AUC = ' + str(np.round(AUC, 2)) + ', pAUCc = ' + str(np.round(pAUCc,2)),
+                text = tdf['TP'] + '<br>' + tdf['FP'] + '<br>' + tdf['TN'] + '<br>' + tdf['FN'] + '<br>' + tdf['threshold'] + '<br>' + tdf['N'],
+                opacity = 0.75,
+                line=dict(color=clr, width=2),
+            ))
+        
+    fig_data.append(go.Scatter(x=[mfr, mfr], y=[0, 1], mode="lines", type = 'scatter',
+                                marker_color = '#b3b3b3', name="Max FPR"))
+    
+    figure = go.Figure(
+        data=fig_data,
+        layout=go.Layout(
+            xaxis=dict(
+                title=dict(
+                    text="<b>False negative rate (FNR)</b>",
+                    font=dict(
+                        family='"Open Sans", "HelveticaNeue", "Helvetica Neue",'
+                        " Helvetica, Arial, sans-serif",
+                        size=14,
+                    ),
+                ),
+                rangemode="tozero",
+                zeroline=True,
+                showticklabels=True,
+            ),
+            
+            yaxis=dict(
+                title=dict(
+                    text="<b>True negative rate (TNR)</b>",
+                    font=dict(
+                        family='"Open Sans", "HelveticaNeue", "Helvetica Neue",'
+                        " Helvetica, Arial, sans-serif",
+                        size=14,
+                        
+                    ),
+                ),
+                rangemode="tozero",
+                zeroline=True,
+                showticklabels=True,
+            ),
+            
+            margin=dict(l=60, r=30, b=10, t=40),
+            showlegend=True,
+            height=550,
+            paper_bgcolor="rgb(245, 247, 249)",
+            plot_bgcolor="rgb(245, 247, 249)",
+        ),
+    )
+    
+    ypos = -0.25
+    figure.update_layout(
+        legend=dict(
+            orientation = "h",
+            y = ypos,
+            yanchor = "top",
+            xanchor="left",
+            traceorder = "normal",
+            font = dict(
+                size = 12,
+                color = "rgb(38, 38, 38)"
+            ),
+            
+        )
+    )
 
     return figure
 
@@ -653,9 +1060,10 @@ def update_results_roc_fig(df2):
 
 @app.callback(Output('prc_fig1_plot', 'figure'),
               [Input('df2', 'children'),
+              Input('traces2', 'value'),
               ],
               )
-def update_results_prc_fig(df2):
+def update_results_prc_fig1(df2, traces_ls):
     
     try:
         df2 = pd.read_json(df2)
@@ -678,40 +1086,64 @@ def update_results_prc_fig(df2):
                       margin=dict(l=10, r=10, b=10, t=0),
                       paper_bgcolor="#f0f0f0",
                       plot_bgcolor="#f0f0f0",
-                      height=400,
+                      height=550,
                       )
         
         return figure
         
     
-    df2 = df2[df2['PPV'] >= 0]
     df2 = df2[df2['TPR'] >= 0]
-    
-    AUC = auc(df2['TPR'], df2['PPV'])
-    
-    clrs = ['#ff0000', '#0000ff', '#009900', '#993399', '#009999',
-            '#ff9966', '#00ff00', '#3366cc', '#cc6699', '#000066',]
-    clr = clrs[0]
+    df2 = df2[df2['PPV'] >= 0]
     
     fig_data = []
+    clrs = ['#262626', '#ff0000', '#0066ff', '#b300b3', '#00cccc']
     
-    df2.sort_values(by=['TPR', 'PPV'], ascending=True, inplace=True)
-    
-    fig_data.append(
-            go.Scatter(x = df2['TPR'], y = df2['PPV'], mode="lines", marker_color = clr,
-            name = '(AUPRC = ' + str(np.round(AUC, 2)) + ')',
-            text = df2['TP'] + '<br>' + df2['FP'] + '<br>' + df2['TN'] + '<br>' + df2['FN'] + '<br>' + df2['threshold'] + '<br>' + df2['N'],
-            opacity = 0.75,
-            line=dict(color=clr, width=2),
-        ))
-        
+    for ic, c in enumerate(traces_ls):
 
+        if c == 'all quartiles':
+            clr = clrs[0]
+        elif c == 'upper quartile':
+            clr = clrs[1]
+        elif c == 'lower quartile':
+            clr = clrs[2]
+        elif c == 'upper and lower quartiles':
+            clr = clrs[3]
+        elif c == 'middle quartiles':
+            clr = clrs[4]
+            
+        tdf = df2[df2['certainty_category'] == c]
+        #print('\n\n-----------------------------', c)
+        #print('----------------------------- shape', tdf.shape[0])
+        #print('-----------------------------\n\n',)
+        
+        tdf.sort_values(by=['TPR', 'PPV'], ascending=True, inplace=True)
+        
+        ppv = tdf['PPV'].tolist()
+        tpr = tdf['TPR'].tolist()
+        
+        #fpr, tpr = fix_end_points(fpr, tpr)
+        AUC = auc(tpr, ppv)
+        
+        #pAUC = get_partial_auc(fnr, tnr, mfr)
+        #pAUCc = pAUC[3]
+
+        fig_data.append(
+                go.Scatter(x = tdf['TPR'], y = tdf['PPV'], mode="lines", marker_color = clr,
+                name = c + ': AUC = ' + str(np.round(AUC, 2)),# + ', pAUCc = ' + str(np.round(pAUCc,2)),
+                text = tdf['TP'] + '<br>' + tdf['FP'] + '<br>' + tdf['TN'] + '<br>' + tdf['FN'] + '<br>' + tdf['threshold'] + '<br>' + tdf['N'],
+                opacity = 0.75,
+                line=dict(color=clr, width=2),
+            ))
+        
+    #fig_data.append(go.Scatter(x=[mfr, mfr], y=[0, 1], mode="lines", type = 'scatter',
+    #                            marker_color = '#b3b3b3', name="Max FPR"))
+    
     figure = go.Figure(
         data=fig_data,
         layout=go.Layout(
             xaxis=dict(
                 title=dict(
-                    text="<b>Recall (aka sensitivity, true positive rate)</b>",
+                    text="<b>True positive rate (TPR)</b>",
                     font=dict(
                         family='"Open Sans", "HelveticaNeue", "Helvetica Neue",'
                         " Helvetica, Arial, sans-serif",
@@ -725,7 +1157,7 @@ def update_results_prc_fig(df2):
             
             yaxis=dict(
                 title=dict(
-                    text="<b>Precision (aka positive predictive value)</b>",
+                    text="<b>Positive predictive value (PPV)</b>",
                     font=dict(
                         family='"Open Sans", "HelveticaNeue", "Helvetica Neue",'
                         " Helvetica, Arial, sans-serif",
@@ -740,16 +1172,170 @@ def update_results_prc_fig(df2):
             
             margin=dict(l=60, r=30, b=10, t=40),
             showlegend=True,
-            height=400,
+            height=550,
             paper_bgcolor="rgb(245, 247, 249)",
             plot_bgcolor="rgb(245, 247, 249)",
         ),
     )
     
+    ypos = -0.25
+    figure.update_layout(
+        legend=dict(
+            orientation = "h",
+            y = ypos,
+            yanchor = "top",
+            xanchor="left",
+            traceorder = "normal",
+            font = dict(
+                size = 12,
+                color = "rgb(38, 38, 38)"
+            ),
+            
+        )
+    )
 
     return figure
 
 
+
+
+@app.callback(Output('prc_fig2_plot', 'figure'),
+              [Input('df2', 'children'),
+              Input('traces2', 'value'),
+              ],
+              )
+def update_results_prc_fig2(df2, traces_ls):
+    
+    try:
+        df2 = pd.read_json(df2)
+    except:
+        df2 = None
+    
+    if df2 is None or len(df2['NPV'].tolist()) == 0:
+    
+        figure = go.Figure(data=[go.Table(
+                header=dict(values=[],
+                        fill_color='#b3d1ff',
+                        align='left'),
+                        ),
+                    ],
+                )
+
+        figure.update_layout(title_font=dict(size=14,
+                      color="rgb(38, 38, 38)",
+                      ),
+                      margin=dict(l=10, r=10, b=10, t=0),
+                      paper_bgcolor="#f0f0f0",
+                      plot_bgcolor="#f0f0f0",
+                      height=550,
+                      )
+        
+        return figure
+        
+    
+    df2 = df2[df2['TNR'] >= 0]
+    df2 = df2[df2['NPV'] >= 0]
+    
+    fig_data = []
+    clrs = ['#262626', '#ff0000', '#0066ff', '#b300b3', '#00cccc']
+    
+    for ic, c in enumerate(traces_ls):
+
+        if c == 'all quartiles':
+            clr = clrs[0]
+        elif c == 'upper quartile':
+            clr = clrs[1]
+        elif c == 'lower quartile':
+            clr = clrs[2]
+        elif c == 'upper and lower quartiles':
+            clr = clrs[3]
+        elif c == 'middle quartiles':
+            clr = clrs[4]
+            
+        tdf = df2[df2['certainty_category'] == c]
+        #print('\n\n-----------------------------', c)
+        #print('----------------------------- shape', tdf.shape[0])
+        #print('-----------------------------\n\n',)
+        
+        tdf.sort_values(by=['TNR', 'NPV'], ascending=True, inplace=True)
+        
+        npv = tdf['NPV'].tolist()
+        tnr = tdf['TNR'].tolist()
+        
+        #fpr, tpr = fix_end_points(fpr, tpr)
+        AUC = auc(tnr, npv)
+        
+        #pAUC = get_partial_auc(fnr, tnr, mfr)
+        #pAUCc = pAUC[3]
+
+        fig_data.append(
+                go.Scatter(x = tdf['TNR'], y = tdf['NPV'], mode="lines", marker_color = clr,
+                name = c + ': AUC = ' + str(np.round(AUC, 2)),# + ', pAUCc = ' + str(np.round(pAUCc,2)),
+                text = tdf['TP'] + '<br>' + tdf['FP'] + '<br>' + tdf['TN'] + '<br>' + tdf['FN'] + '<br>' + tdf['threshold'] + '<br>' + tdf['N'],
+                opacity = 0.75,
+                line=dict(color=clr, width=2),
+            ))
+        
+    #fig_data.append(go.Scatter(x=[mfr, mfr], y=[0, 1], mode="lines", type = 'scatter',
+    #                            marker_color = '#b3b3b3', name="Max FPR"))
+    
+    figure = go.Figure(
+        data=fig_data,
+        layout=go.Layout(
+            xaxis=dict(
+                title=dict(
+                    text="<b>True negative rate (TNR)</b>",
+                    font=dict(
+                        family='"Open Sans", "HelveticaNeue", "Helvetica Neue",'
+                        " Helvetica, Arial, sans-serif",
+                        size=14,
+                    ),
+                ),
+                rangemode="tozero",
+                zeroline=True,
+                showticklabels=True,
+            ),
+            
+            yaxis=dict(
+                title=dict(
+                    text="<b>Negative predictive value (NPV)</b>",
+                    font=dict(
+                        family='"Open Sans", "HelveticaNeue", "Helvetica Neue",'
+                        " Helvetica, Arial, sans-serif",
+                        size=14,
+                        
+                    ),
+                ),
+                rangemode="tozero",
+                zeroline=True,
+                showticklabels=True,
+            ),
+            
+            margin=dict(l=60, r=30, b=10, t=40),
+            showlegend=True,
+            height=550,
+            paper_bgcolor="rgb(245, 247, 249)",
+            plot_bgcolor="rgb(245, 247, 249)",
+        ),
+    )
+    
+    ypos = -0.25
+    figure.update_layout(
+        legend=dict(
+            orientation = "h",
+            y = ypos,
+            yanchor = "top",
+            xanchor="left",
+            traceorder = "normal",
+            font = dict(
+                size = 12,
+                color = "rgb(38, 38, 38)"
+            ),
+            
+        )
+    )
+
+    return figure
 #########################################################################################
 ############################# Run the server ############################################
 #########################################################################################
